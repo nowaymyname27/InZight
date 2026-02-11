@@ -11,19 +11,26 @@ pub fn main() !void {
     var spy = SpyAllocator.init(gpa.allocator());
     var allocator = spy.allocator();
 
-    const slice = try allocator.alloc(i32, 5);
+    const slice = try allocator.alloc(i64, 5);
     defer allocator.free(slice);
 }
 
 pub const SpyAllocator = struct {
     // State: parent allocator to do the actual work
     parent_allocator: std.mem.Allocator,
+    events: std.ArrayList(Event),
 
     const Self = @This();
+
+    pub const Event = union(enum) {
+        alloc: struct { addr: usize, len: usize },
+        free: struct { addr: usize },
+    };
 
     pub fn init(parent_allocator: std.mem.Allocator) Self {
         return Self{
             .parent_allocator = parent_allocator,
+            .events = std.ArrayList(Event).init(parent_allocator),
         };
     }
 
