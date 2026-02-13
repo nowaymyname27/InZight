@@ -13,6 +13,7 @@ pub fn main() !void {
 
     // We initialize our SpyAllocator using gpa as the parent allocator
     var spy = SpyAllocator.init(gpa.allocator());
+    defer spy.deinit();
     var allocator = spy.allocator();
 
     // Tries to allocate the desired memory, returns an error if it fails
@@ -25,7 +26,7 @@ pub const SpyAllocator = struct {
     // parent allocator to do the actual work
     parent_allocator: std.mem.Allocator,
     // A list to store history of every allocation
-    events: std.ArrayList(Event),
+    events: std.ArrayListUnmanaged(Event),
 
     // @This makes Self the type of the immediate parent struct
     const Self = @This(); // SpyAllocator is the type being assigned here
@@ -40,8 +41,12 @@ pub const SpyAllocator = struct {
     pub fn init(parent_allocator: std.mem.Allocator) Self {
         return Self{
             .parent_allocator = parent_allocator,
-            .events = std.ArrayList(Event).init(parent_allocator), // uses parent_allocator to create the events list
+            .events = .{},
         };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.events.deinit(self.parent_allocator);
     }
 
     // Using the allocator interface to set up our SpyAllocator
@@ -70,7 +75,7 @@ pub const SpyAllocator = struct {
         // Spy Action
         if (result) |ptr| {
             const addr = @intFromPtr(ptr);
-            self.events.append(.{
+            self.events.append(self.parent_allocator, .{
                 .alloc = .{ // Recording an allocation
                     .addr = addr, // Record the address of the memory being allocated
                     .len = len, // Record the length
@@ -105,7 +110,7 @@ pub const SpyAllocator = struct {
         const self: *SpyAllocator = @ptrCast(@alignCast(ctx)); // casting
         const addr = @intFromPtr(buf.ptr);
         // Spy action
-        self.events.append(.{
+        self.events.append(self.parent_allocator, .{
             .free = .{ // Recording what memory is freed
                 .addr = addr, // The address of the memory being released
             },
