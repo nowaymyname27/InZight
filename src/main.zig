@@ -76,8 +76,9 @@ pub const SpyAllocator = struct {
                     .len = len, // Record the length
                 },
             }) catch {
+                // Lets me know if the SpyAllocator doesn't have enough memory to record
                 std.debug.print("WARNING: SpyAllocator failed to record allocation (Out of Memory)\n", .{});
-            }; // Lets me know if the SpyAllocator doesn't have enough memory to capture
+            };
         }
         return result;
     }
@@ -102,7 +103,16 @@ pub const SpyAllocator = struct {
         ret_addr: usize, // Address of the code calling this function (for stack traces)
     ) void {
         const self: *SpyAllocator = @ptrCast(@alignCast(ctx)); // casting
-        std.debug.print("FREE\n", .{}); // Spy action
+        const addr = @intFromPtr(buf.ptr);
+        // Spy action
+        self.events.append(.{
+            .free = .{ // Recording what memory is freed
+                .addr = addr, // The address of the memory being released
+            },
+        }) catch {
+            // Lets me know if the SpyAllocator doesn't have enough memory to record
+            std.debug.print("WARNING: SpyAllocator failed to record memory being freed (Out of Memory)\n", .{});
+        };
         return self.parent_allocator.rawFree(buf, buf_align, ret_addr); // Freeing memory
     }
 
