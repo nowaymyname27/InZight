@@ -66,8 +66,20 @@ pub const SpyAllocator = struct {
         ret_addr: usize, // Address of the code calling this function (for stack traces)
     ) ?[*]u8 {
         const self: *SpyAllocator = @ptrCast(@alignCast(ctx)); // Casting
-        std.debug.print("ALLOC: {d} bytes\n", .{len}); // Spy action
-        return self.parent_allocator.rawAlloc(len, ptr_align, ret_addr); // Allocation
+        const result = self.parent_allocator.rawAlloc(len, ptr_align, ret_addr); // Allocation
+        // Spy Action
+        if (result) |ptr| {
+            const addr = @intFromPtr(ptr);
+            self.events.append(.{
+                .alloc = .{ // Recording an allocation
+                    .addr = addr, // Record the address of the memory being allocated
+                    .len = len, // Record the length
+                },
+            }) catch {
+                std.debug.print("WARNING: SpyAllocator failed to record allocation (Out of Memory)\n", .{});
+            }; // Lets me know if the SpyAllocator doesn't have enough memory to capture
+        }
+        return result;
     }
 
     // resizes the existing block of memory without changing its location
