@@ -153,6 +153,8 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+
+    // This is the library I am using for the TUI
     const vaxis = b.dependency("vaxis", .{
         .target = target,
         .optimize = optimize,
