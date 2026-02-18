@@ -1,8 +1,7 @@
 const std = @import("std");
+const vaxis = @import("vaxis");
 const heap = std.heap;
 const fmt = std.fmt;
-const vaxis = @import("vaxis");
-const vxfw = vaxis.vxfw;
 
 const TableRow = struct {
     action: []const u8,
@@ -15,40 +14,72 @@ const AppEvent = union(enum) {
     winsize: vaxis.Winsize,
 };
 
-/// Our main application state
-pub fn main() !void {
-    // Using a GeneralPurposeAllocator as the parent allocator
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+// The Worker Thread that creates "Visual Noise"
+fn demo_thread(allocator: std.mem.Allocator) void {
+    // FIX 1: Use std.Random
+    var prng = std.Random.DefaultPrng.init(0);
+    const random = prng.random();
 
-    // Checks for memory leaks at the end of scope
+    // FIX 2: Use ArrayListUnmanaged
+    var list = std.ArrayListUnmanaged([]u8){};
+    defer list.deinit(allocator);
+
+    while (true) {
+        // Phase 1: Allocate
+        var i: usize = 0;
+        while (i < 20) : (i += 1) {
+            const size = random.intRangeAtMost(usize, 16, 64);
+            if (allocator.alloc(u8, size)) |chunk| {
+                list.append(allocator, chunk) catch {};
+            } else |_| break;
+
+            std.Thread.sleep(100 * std.time.ns_per_ms);
+        }
+
+        // Phase 2: Fragment
+        var j: usize = 0;
+        while (j < 10) : (j += 1) {
+            if (list.items.len == 0) break;
+            const idx = random.uintLessThan(usize, list.items.len);
+            const chunk = list.orderedRemove(idx);
+            allocator.free(chunk); // If this still errors, change to `allocator.free(chunk orelse continue);`
+
+            std.Thread.sleep(150 * std.time.ns_per_ms);
+        }
+
+        // Phase 3: Drain
+        while (list.items.len > 0) {
+            const chunk_opt = list.pop();
+            if (chunk_opt) |chunk| {
+                allocator.free(chunk);
+            }
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+        }
+    }
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
         const deinit_status = gpa.deinit();
-        // If memory leaks somewhere this will terminate the program
         if (deinit_status == .leak) @panic("TEST FAIL");
     }
 
-    // We initialize our SpyAllocator using gpa as the parent allocator
     var spy = SpyAllocator.init(gpa.allocator());
     defer spy.deinit();
 
     const tracked_allocator = spy.allocator();
 
-    {
-        const a = try tracked_allocator.alloc(u8, 100);
-        const b = try tracked_allocator.alloc(u32, 5);
-        tracked_allocator.free(a);
-        const c = try tracked_allocator.alloc(u8, 200);
-        defer tracked_allocator.free(b);
-        defer tracked_allocator.free(c);
-    }
+    const thread = try std.Thread.spawn(.{}, demo_thread, .{tracked_allocator});
+    thread.detach();
 
     var tty_buf: [4096]u8 = undefined;
     var tty = try vaxis.Tty.init(&tty_buf);
     defer tty.deinit();
 
     var vx = try vaxis.init(gpa.allocator(), .{});
-    const tty_writer = tty.writer();
     defer vx.deinit(gpa.allocator(), tty.writer());
+    const tty_writer = tty.writer();
 
     var loop: vaxis.Loop(AppEvent) = .{
         .tty = &tty,
@@ -61,78 +92,98 @@ pub fn main() !void {
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
 
-    // 5. Setup Table Configuration
-    var table_ctx: vaxis.widgets.Table.TableContext = .{
-        // Define columns: Type, Address, Size
-        .header_names = .{ .custom = &.{ "Action", "Address", "Size (Bytes)" } },
-        // Map columns to fields in 'TableRow' struct: 0->type, 1->address, 2->size
-        .col_indexes = .{ .by_idx = &.{ 0, 1, 2 } },
-        .active_bg = .{ .rgb = .{ 64, 128, 255 } },
-        .selected_bg = .{ .rgb = .{ 32, 64, 255 } },
-        // Default column width strategy
-        .col_width = .{ .static_individual = &.{ 10, 20, 15 } },
-    };
-
-    // Arena for per-frame temporary allocations (like the string adapters)
     var frame_arena = heap.ArenaAllocator.init(gpa.allocator());
     defer frame_arena.deinit();
 
+    var scroll_offset: usize = 0;
+
     while (true) {
-        // Reset temporary memory every frame
         const frame_alloc = frame_arena.allocator();
         defer _ = frame_arena.reset(.retain_capacity);
 
-        // Input Handling
         const event = loop.nextEvent();
         switch (event) {
             .key_press => |key| {
                 if (key.matches('c', .{ .ctrl = true })) break;
-
-                // Table Navigation
-                if (key.matches(vaxis.Key.down, .{}) or key.matches('j', .{})) table_ctx.row +|= 1;
-                if (key.matches(vaxis.Key.up, .{}) or key.matches('k', .{})) table_ctx.row -|= 1;
+                if (key.matches(vaxis.Key.down, .{}) or key.matches('j', .{})) scroll_offset +|= 16;
+                if (key.matches(vaxis.Key.up, .{}) or key.matches('k', .{})) scroll_offset -|= 16;
             },
             .winsize => |ws| try vx.resize(gpa.allocator(), tty.writer(), ws),
         }
 
-        // Draw Logic
         const win = vx.window();
         win.clear();
 
-        // 6. The Adapter Logic (Data -> View)
-        // Convert the Spy's "Event List" into a "Table Row List"
-        // We do this every frame. It's fast enough for a TUI.
-        const events = spy.events.items;
-        const rows = try frame_alloc.alloc(TableRow, events.len);
+        const Range = struct { start: usize, end: usize };
+        // FIX 4: Use ArrayListUnmanaged here too
+        var active_ranges = std.ArrayListUnmanaged(Range){};
 
-        for (events, 0..) |evt, i| {
-            switch (evt) {
-                .alloc => |data| {
-                    rows[i] = .{
-                        .action = "ALLOC",
-                        // Format address as hex (0x...)
-                        .address = try fmt.allocPrint(frame_alloc, "0x{x}", .{data.addr}),
-                        // Format size as decimal
-                        .size = try fmt.allocPrint(frame_alloc, "{d}", .{data.len}),
-                    };
-                },
-                .free => |data| {
-                    rows[i] = .{
-                        .action = "FREE",
-                        .address = try fmt.allocPrint(frame_alloc, "0x{x}", .{data.addr}),
-                        .size = "-", // Or "0"
-                    };
-                },
+        {
+            spy.mutex.lock();
+            defer spy.mutex.unlock();
+
+            for (spy.events.items) |evt| {
+                switch (evt) {
+                    .alloc => |data| try active_ranges.append(frame_alloc, .{ .start = data.addr, .end = data.addr + data.len }),
+                    .free => |data| {
+                        for (active_ranges.items, 0..) |r, i| {
+                            if (r.start == data.addr) {
+                                _ = active_ranges.swapRemove(i);
+                                break;
+                            }
+                        }
+                    },
+                }
             }
         }
 
-        // 7. Draw the Table
-        try vaxis.widgets.Table.drawTable(
-            null,
-            win,
-            rows, // Pass our adapted rows
-            &table_ctx,
-        );
+        var base_addr: usize = 0;
+        if (active_ranges.items.len > 0) {
+            base_addr = active_ranges.items[0].start;
+            base_addr = base_addr & ~@as(usize, 0xF);
+        }
+        base_addr +|= scroll_offset;
+
+        const bytes_per_row = 16;
+        var row: usize = 0;
+
+        while (row < win.height) : (row += 1) {
+            const row_addr = base_addr + (row * bytes_per_row);
+
+            // FIX 5: Use Child Windows for positioning instead of .row/.col options
+            // Create a temporary window just for this row
+            const row_win = win.child(.{
+                .x_off = 0,
+                .y_off = @intCast(row),
+                .width = win.width,
+                .height = 1,
+            });
+
+            // 1. Draw Address
+            const addr_str = try fmt.allocPrint(frame_alloc, "0x{x} │ ", .{row_addr});
+            _ = row_win.print(&.{.{ .text = addr_str, .style = .{ .fg = .{ .rgb = .{ 100, 100, 100 } } } }}, .{});
+
+            // 2. Draw Blocks (We append to the row_win, which automatically moves cursor right)
+            var col: usize = 0;
+            while (col < bytes_per_row) : (col += 1) {
+                const curr_addr = row_addr + col;
+                var is_allocated = false;
+                for (active_ranges.items) |range| {
+                    if (curr_addr >= range.start and curr_addr < range.end) {
+                        is_allocated = true;
+                        break;
+                    }
+                }
+
+                const char = if (is_allocated) "█ " else "· ";
+                const style: vaxis.Cell.Style = if (is_allocated)
+                    .{ .fg = .{ .rgb = .{ 0, 255, 0 } } }
+                else
+                    .{ .fg = .{ .rgb = .{ 60, 60, 60 } } };
+
+                _ = row_win.print(&.{.{ .text = char, .style = style }}, .{});
+            }
+        }
 
         try vx.render(tty_writer);
     }
@@ -143,6 +194,8 @@ pub const SpyAllocator = struct {
     parent_allocator: std.mem.Allocator,
     // A list to store history of every allocation
     events: std.ArrayListUnmanaged(Event),
+    // Thread safety
+    mutex: std.Thread.Mutex,
 
     // @This makes Self the type of the immediate parent struct
     const Self = @This(); // SpyAllocator is the type being assigned here
@@ -155,10 +208,7 @@ pub const SpyAllocator = struct {
 
     // initializes the struct when called
     pub fn init(parent_allocator: std.mem.Allocator) Self {
-        return Self{
-            .parent_allocator = parent_allocator,
-            .events = .{},
-        };
+        return Self{ .parent_allocator = parent_allocator, .events = .{}, .mutex = .{} };
     }
 
     pub fn deinit(self: *Self) void {
@@ -191,14 +241,15 @@ pub const SpyAllocator = struct {
         // Spy Action
         if (result) |ptr| {
             const addr = @intFromPtr(ptr);
+
+            // LOCK THE MUTEX
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
             self.events.append(self.parent_allocator, .{
-                .alloc = .{ // Recording an allocation
-                    .addr = addr, // Record the address of the memory being allocated
-                    .len = len, // Record the length
-                },
+                .alloc = .{ .addr = addr, .len = len },
             }) catch {
-                // Lets me know if the SpyAllocator doesn't have enough memory to record
-                std.debug.print("WARNING: SpyAllocator failed to record allocation (Out of Memory)\n", .{});
+                std.debug.print("WARNING: SpyAllocator failed to record allocation\n", .{});
             };
         }
         return result;
@@ -226,14 +277,16 @@ pub const SpyAllocator = struct {
         const self: *SpyAllocator = @ptrCast(@alignCast(ctx)); // casting
         const addr = @intFromPtr(buf.ptr);
         // Spy action
-        self.events.append(self.parent_allocator, .{
-            .free = .{ // Recording what memory is freed
-                .addr = addr, // The address of the memory being released
-            },
-        }) catch {
-            // Lets me know if the SpyAllocator doesn't have enough memory to record
-            std.debug.print("WARNING: SpyAllocator failed to record memory being freed (Out of Memory)\n", .{});
-        };
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            self.events.append(self.parent_allocator, .{
+                .free = .{ .addr = addr },
+            }) catch {
+                std.debug.print("WARNING: SpyAllocator failed to record free\n", .{});
+            };
+        }
         return self.parent_allocator.rawFree(buf, buf_align, ret_addr); // Freeing memory
     }
 
