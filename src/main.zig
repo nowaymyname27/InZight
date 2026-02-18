@@ -1,122 +1,26 @@
 const std = @import("std");
+const heap = std.heap;
+const fmt = std.fmt;
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
-/// Our main application state
-const Model = struct {
-    /// State of the counter
-    count: u32 = 0,
-    /// The button. This widget is stateful and must live between frames
-    button: vxfw.Button,
-
-    /// Helper function to return a vxfw.Widget struct
-    pub fn widget(self: *Model) vxfw.Widget {
-        return .{
-            .userdata = self,
-            .eventHandler = Model.typeErasedEventHandler,
-            .drawFn = Model.typeErasedDrawFn,
-        };
-    }
-
-    /// This function will be called from the vxfw runtime.
-    fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-        const self: *Model = @ptrCast(@alignCast(ptr));
-        switch (event) {
-            // The root widget is always sent an init event as the first event. Users of the
-            // library can also send this event to other widgets they create if they need to do
-            // some initialization.
-            .init => return ctx.requestFocus(self.button.widget()),
-            .key_press => |key| {
-                if (key.matches('c', .{ .ctrl = true })) {
-                    ctx.quit = true;
-                    return;
-                }
-            },
-            // We can request a specific widget gets focus. In this case, we always want to focus
-            // our button. Having focus means that key events will be sent up the widget tree to
-            // the focused widget, and then bubble back down the tree to the root. Users can tell
-            // the runtime the event was handled and the capture or bubble phase will stop
-            .focus_in => return ctx.requestFocus(self.button.widget()),
-            else => {},
-        }
-    }
-
-    /// This function is called from the vxfw runtime. It will be called on a regular interval, and
-    /// only when any event handler has marked the redraw flag in EventContext as true. By
-    /// explicitly requiring setting the redraw flag, vxfw can prevent excessive redraws for events
-    /// which don't change state (ie mouse motion, unhandled key events, etc)
-    fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *Model = @ptrCast(@alignCast(ptr));
-        // The DrawContext is inspired from Flutter. Each widget will receive a minimum and maximum
-        // constraint. The minimum constraint will always be set, even if it is set to 0x0. The
-        // maximum constraint can have null width and/or height - meaning there is no constraint in
-        // that direction and the widget should take up as much space as it needs. By calling size()
-        // on the max, we assert that it has some constrained size. This is *always* the case for
-        // the root widget - the maximum size will always be the size of the terminal screen.
-        const max_size = ctx.max.size();
-
-        // The DrawContext also contains an arena allocator that can be used for each frame. The
-        // lifetime of this allocation is until the next time we draw a frame. This is useful for
-        // temporary allocations such as the one below: we have an integer we want to print as text.
-        // We can safely allocate this with the ctx arena since we only need it for this frame.
-        if (self.count > 0) {
-            self.button.label = try std.fmt.allocPrint(ctx.arena, "Clicks: {d}", .{self.count});
-        } else {
-            self.button.label = "Click me!";
-        }
-
-        // Each widget returns a Surface from it's draw function. A Surface contains the rectangular
-        // area of the widget, as well as some information about the surface or widget: can we focus
-        // it? does it handle the mouse?
-        //
-        // It DOES NOT contain the location it should be within it's parent. Only the parent can set
-        // this via a SubSurface. Here, we will return a Surface for the root widget (Model), which
-        // has two SubSurfaces: one for the text and one for the button. A SubSurface is a Surface
-        // with an offset and a z-index - the offset can be negative. This lets a parent draw a
-        // child and place it within itself
-        const button_child: vxfw.SubSurface = .{
-            .origin = .{ .row = 0, .col = 0 },
-            .surface = try self.button.draw(ctx.withConstraints(
-                ctx.min,
-                // Here we explicitly set a new maximum size constraint for the Button. A Button will
-                // expand to fill it's area and must have some hard limit in the maximum constraint
-                .{ .width = 16, .height = 3 },
-            )),
-        };
-
-        // We also can use our arena to allocate the slice for our SubSurfaces. This slice only
-        // needs to live until the next frame, making this safe.
-        const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-        children[0] = button_child;
-
-        return .{
-            // A Surface must have a size. Our root widget is the size of the screen
-            .size = max_size,
-            .widget = self.widget(),
-            // We didn't actually need to draw anything for the root. In this case, we can set
-            // buffer to a zero length slice. If this slice is *not zero length*, the runtime will
-            // assert that it's length is equal to the size.width * size.height.
-            .buffer = &.{},
-            .children = children,
-        };
-    }
-
-    /// The onClick callback for our button. This is also called if we press enter while the button
-    /// has focus
-    fn onClick(maybe_ptr: ?*anyopaque, ctx: *vxfw.EventContext) anyerror!void {
-        const ptr = maybe_ptr orelse return;
-        const self: *Model = @ptrCast(@alignCast(ptr));
-        self.count +|= 1;
-        return ctx.consumeAndRedraw();
-    }
+const TableRow = struct {
+    action: []const u8,
+    address: []const u8,
+    size: []const u8,
 };
 
+const AppEvent = union(enum) {
+    key_press: vaxis.Key,
+    winsize: vaxis.Winsize,
+};
+
+/// Our main application state
 pub fn main() !void {
     // Using a GeneralPurposeAllocator as the parent allocator
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
     // Checks for memory leaks at the end of scope
-    defer _ = gpa.deinit();
     defer {
         const deinit_status = gpa.deinit();
         // If memory leaks somewhere this will terminate the program
@@ -126,24 +30,112 @@ pub fn main() !void {
     // We initialize our SpyAllocator using gpa as the parent allocator
     var spy = SpyAllocator.init(gpa.allocator());
     defer spy.deinit();
-    const allocator = gpa.allocator();
 
-    var app = try vxfw.App.init(allocator);
-    defer app.deinit();
+    const tracked_allocator = spy.allocator();
 
-    const model = try allocator.create(Model);
-    defer allocator.destroy(model);
+    {
+        const a = try tracked_allocator.alloc(u8, 100);
+        const b = try tracked_allocator.alloc(u32, 5);
+        tracked_allocator.free(a);
+        const c = try tracked_allocator.alloc(u8, 200);
+        defer tracked_allocator.free(b);
+        defer tracked_allocator.free(c);
+    }
 
-    model.* = .{
-        .count = 0,
-        .button = .{
-            .label = "Click me!",
-            .onClick = Model.onClick,
-            .userdata = model,
-        },
+    var tty_buf: [4096]u8 = undefined;
+    var tty = try vaxis.Tty.init(&tty_buf);
+    defer tty.deinit();
+
+    var vx = try vaxis.init(gpa.allocator(), .{});
+    const tty_writer = tty.writer();
+    defer vx.deinit(gpa.allocator(), tty.writer());
+
+    var loop: vaxis.Loop(AppEvent) = .{
+        .tty = &tty,
+        .vaxis = &vx,
+    };
+    try loop.init();
+    try loop.start();
+    defer loop.stop();
+
+    try vx.enterAltScreen(tty.writer());
+    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
+
+    // 5. Setup Table Configuration
+    var table_ctx: vaxis.widgets.Table.TableContext = .{
+        // Define columns: Type, Address, Size
+        .header_names = .{ .custom = &.{ "Action", "Address", "Size (Bytes)" } },
+        // Map columns to fields in 'TableRow' struct: 0->type, 1->address, 2->size
+        .col_indexes = .{ .by_idx = &.{ 0, 1, 2 } },
+        .active_bg = .{ .rgb = .{ 64, 128, 255 } },
+        .selected_bg = .{ .rgb = .{ 32, 64, 255 } },
+        // Default column width strategy
+        .col_width = .{ .static_individual = &.{ 10, 20, 15 } },
     };
 
-    try app.run(model.widget(), .{});
+    // Arena for per-frame temporary allocations (like the string adapters)
+    var frame_arena = heap.ArenaAllocator.init(gpa.allocator());
+    defer frame_arena.deinit();
+
+    while (true) {
+        // Reset temporary memory every frame
+        const frame_alloc = frame_arena.allocator();
+        defer _ = frame_arena.reset(.retain_capacity);
+
+        // Input Handling
+        const event = loop.nextEvent();
+        switch (event) {
+            .key_press => |key| {
+                if (key.matches('c', .{ .ctrl = true })) break;
+
+                // Table Navigation
+                if (key.matches(vaxis.Key.down, .{}) or key.matches('j', .{})) table_ctx.row +|= 1;
+                if (key.matches(vaxis.Key.up, .{}) or key.matches('k', .{})) table_ctx.row -|= 1;
+            },
+            .winsize => |ws| try vx.resize(gpa.allocator(), tty.writer(), ws),
+        }
+
+        // Draw Logic
+        const win = vx.window();
+        win.clear();
+
+        // 6. The Adapter Logic (Data -> View)
+        // Convert the Spy's "Event List" into a "Table Row List"
+        // We do this every frame. It's fast enough for a TUI.
+        const events = spy.events.items;
+        const rows = try frame_alloc.alloc(TableRow, events.len);
+
+        for (events, 0..) |evt, i| {
+            switch (evt) {
+                .alloc => |data| {
+                    rows[i] = .{
+                        .action = "ALLOC",
+                        // Format address as hex (0x...)
+                        .address = try fmt.allocPrint(frame_alloc, "0x{x}", .{data.addr}),
+                        // Format size as decimal
+                        .size = try fmt.allocPrint(frame_alloc, "{d}", .{data.len}),
+                    };
+                },
+                .free => |data| {
+                    rows[i] = .{
+                        .action = "FREE",
+                        .address = try fmt.allocPrint(frame_alloc, "0x{x}", .{data.addr}),
+                        .size = "-", // Or "0"
+                    };
+                },
+            }
+        }
+
+        // 7. Draw the Table
+        try vaxis.widgets.Table.drawTable(
+            null,
+            win,
+            rows, // Pass our adapted rows
+            &table_ctx,
+        );
+
+        try vx.render(tty_writer);
+    }
 }
 
 pub const SpyAllocator = struct {
