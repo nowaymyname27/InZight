@@ -15,20 +15,99 @@ const MemoryLayoutAction = enum {
 
 const MemoryLayoutStep = struct {
     title: []const u8,
-    message: []const u8,
+    description_lines: []const []const u8,
+    key_takeaway: []const u8,
     action: MemoryLayoutAction,
     focus_segment_start: usize,
     focus_segment_end: usize,
 };
 
 const memory_layout_steps = [_]MemoryLayoutStep{
-    .{ .title = "Process Memory Overview", .message = "This is a simulated process layout from low to high addresses.", .action = .none, .focus_segment_start = 0, .focus_segment_end = 5 },
-    .{ .title = "Text Segment", .message = "Text stores machine code and is fixed Read/Execute.", .action = .none, .focus_segment_start = 0, .focus_segment_end = 0 },
-    .{ .title = "Data + BSS Segments", .message = "Data and BSS store globals/statics and stay fixed Read/Write.", .action = .none, .focus_segment_start = 1, .focus_segment_end = 2 },
-    .{ .title = "Heap Growth (Upward)", .message = "A heap allocation adds bytes at higher addresses (upward).", .action = .heap_alloc, .focus_segment_start = 3, .focus_segment_end = 3 },
-    .{ .title = "Stack Growth (Downward)", .message = "A function call pushes a frame to lower addresses (downward).", .action = .stack_call, .focus_segment_start = 5, .focus_segment_end = 5 },
-    .{ .title = "The Gap", .message = "Heap and stack move toward each other; this gap is your remaining room.", .action = .gap_pressure, .focus_segment_start = 4, .focus_segment_end = 4 },
-    .{ .title = "Recap", .message = "Text/Data/BSS are fixed. Heap grows up. Stack grows down.", .action = .none, .focus_segment_start = 0, .focus_segment_end = 5 },
+    .{
+        .title = "Process Memory Overview",
+        .description_lines = &.{
+            "This diagram shows a simplified process address space.",
+            "Addresses increase from bottom to top in this view.",
+            "Each region has a role, permissions, and growth behavior.",
+            "Later steps zoom in on each region individually.",
+        },
+        .key_takeaway = "Memory is organized in predictable layered segments.",
+        .action = .none,
+        .focus_segment_start = 0,
+        .focus_segment_end = 5,
+    },
+    .{
+        .title = "Text Segment",
+        .description_lines = &.{
+            "The text segment contains compiled machine instructions.",
+            "It is usually marked read/execute to prevent modification.",
+            "This is where CPU fetches code while your program runs.",
+        },
+        .key_takeaway = "Text is executable code and stays fixed in place.",
+        .action = .none,
+        .focus_segment_start = 0,
+        .focus_segment_end = 0,
+    },
+    .{
+        .title = "Data + BSS Segments",
+        .description_lines = &.{
+            "Data holds initialized global and static variables.",
+            "BSS holds uninitialized globals/statics, zeroed at start.",
+            "Both are read/write regions with fixed boundaries.",
+        },
+        .key_takeaway = "Data/BSS store long-lived program state.",
+        .action = .none,
+        .focus_segment_start = 1,
+        .focus_segment_end = 2,
+    },
+    .{
+        .title = "Heap Growth (Upward)",
+        .description_lines = &.{
+            "The heap serves dynamic allocations at runtime.",
+            "Allocations can fragment as blocks are allocated/freed.",
+            "In this model, heap growth moves toward higher addresses.",
+        },
+        .key_takeaway = "Heap grows upward as dynamic memory is requested.",
+        .action = .heap_alloc,
+        .focus_segment_start = 3,
+        .focus_segment_end = 3,
+    },
+    .{
+        .title = "Stack Growth (Downward)",
+        .description_lines = &.{
+            "Each function call pushes a new stack frame.",
+            "Frames hold local variables and return metadata.",
+            "In this model, stack growth moves toward lower addresses.",
+        },
+        .key_takeaway = "Stack grows downward with call depth.",
+        .action = .stack_call,
+        .focus_segment_start = 5,
+        .focus_segment_end = 5,
+    },
+    .{
+        .title = "The Gap",
+        .description_lines = &.{
+            "The gap is free virtual space between heap and stack.",
+            "Heap expansion and deep call stacks consume this space.",
+            "When the gap gets too small, memory pressure increases.",
+        },
+        .key_takeaway = "Heap and stack compete for the same free gap.",
+        .action = .gap_pressure,
+        .focus_segment_start = 4,
+        .focus_segment_end = 4,
+    },
+    .{
+        .title = "Recap",
+        .description_lines = &.{
+            "Text, Data, and BSS remain fixed after load.",
+            "Heap and stack are dynamic and move toward each other.",
+            "Permissions and layout help explain many runtime bugs.",
+        },
+        .key_takeaway = "Know segment roles to reason about memory behavior.",
+        .action = .none,
+        .focus_segment_start = 0,
+        .focus_segment_end = 5,
+    },
 };
 
 pub fn step_count() usize {
@@ -203,6 +282,67 @@ fn render_ascii_panel(win: vaxis.Window, frame_alloc: std.mem.Allocator, step_id
     return 1 + max_lines;
 }
 
+fn render_description_panel(
+    win: vaxis.Window,
+    frame_alloc: std.mem.Allocator,
+    step_idx: usize,
+    step: MemoryLayoutStep,
+    start_row: usize,
+    start_col: usize,
+) !usize {
+    if (start_row >= win.height or start_col >= win.width) return 0;
+
+    const accent = step_color(step_idx);
+    const panel_width = win.width - start_col;
+    if (panel_width < 24) return 0;
+    const inner_width = panel_width - 2;
+
+    var row = start_row;
+    const header_line = try fmt.allocPrint(frame_alloc, "|{s:<[1]}|", .{ "Description", inner_width });
+    shell.print_at(win, row, start_col, header_line, .{ .fg = .{ .rgb = .{ 230, 245, 255 } }, .bg = accent.bg });
+    row += 1;
+
+    for (step.description_lines) |line| {
+        if (row >= win.height) break;
+        const clipped = if (line.len > inner_width) line[0..inner_width] else line;
+        const text_line = try fmt.allocPrint(frame_alloc, "|{s:<[1]}|", .{ clipped, inner_width });
+        shell.print_at(win, row, start_col, text_line, .{ .fg = .{ .rgb = .{ 210, 225, 238 } }, .bg = .{ .rgb = .{ 16, 22, 30 } } });
+        row += 1;
+    }
+
+    if (row < win.height) {
+        const spacer = try fmt.allocPrint(frame_alloc, "|{s:<[1]}|", .{ "", inner_width });
+        shell.print_at(win, row, start_col, spacer, .{ .fg = .{ .rgb = .{ 180, 196, 208 } }, .bg = .{ .rgb = .{ 16, 22, 30 } } });
+        row += 1;
+    }
+
+    if (row < win.height) {
+        const takeaway = try fmt.allocPrint(frame_alloc, "| Key takeaway: {s:<[1]}|", .{ step.key_takeaway, inner_width - 15 });
+        shell.print_at(win, row, start_col, takeaway, .{ .fg = accent.fg, .bg = accent.bg });
+        row += 1;
+    }
+
+    return row - start_row;
+}
+
+fn render_visual_and_description(win: vaxis.Window, frame_alloc: std.mem.Allocator, step_idx: usize, step: MemoryLayoutStep, start_row: usize) !usize {
+    const ascii_width: usize = 30;
+    const gap: usize = 2;
+    const prefer_side_by_side = win.width >= (ascii_width + gap + 32);
+
+    if (prefer_side_by_side) {
+        const ascii_rows = try render_ascii_panel(win, frame_alloc, step_idx, start_row, 2);
+        const desc_start_col = 2 + ascii_width + gap;
+        const desc_rows = try render_description_panel(win, frame_alloc, step_idx, step, start_row, desc_start_col);
+        return @max(ascii_rows, desc_rows);
+    }
+
+    var used = try render_ascii_panel(win, frame_alloc, step_idx, start_row, 2);
+    used += 1;
+    used += try render_description_panel(win, frame_alloc, step_idx, step, start_row + used, 2);
+    return used;
+}
+
 pub fn render(win: vaxis.Window, frame_alloc: std.mem.Allocator, sim: *sim_mod.Simulation, step_idx: usize) !void {
     const clamped_step = if (step_idx < memory_layout_steps.len) step_idx else memory_layout_steps.len - 1;
     const step = memory_layout_steps[clamped_step];
@@ -224,8 +364,6 @@ pub fn render(win: vaxis.Window, frame_alloc: std.mem.Allocator, sim: *sim_mod.S
     row += 1;
 
     shell.print_line_styled(content, row, step.title, .{ .fg = .{ .rgb = .{ 255, 230, 165 } } });
-    row += 1;
-    shell.print_line_styled(content, row, step.message, theme.lesson_dim);
     row += 2;
 
     const table_win = content.child(.{
@@ -237,7 +375,7 @@ pub fn render(win: vaxis.Window, frame_alloc: std.mem.Allocator, sim: *sim_mod.S
     row += try table_segment.draw_segment_table(table_win, frame_alloc, sim, step.focus_segment_start, step.focus_segment_end + 1, step_color(clamped_step));
 
     row += 1;
-    row += try render_ascii_panel(content, frame_alloc, clamped_step, row, 2);
+    row += try render_visual_and_description(content, frame_alloc, clamped_step, step, row);
 
     row += 1;
     shell.print_line_styled(content, row, "Map legend: T=text D=data B=bss .=heap-free 0-F=heap-alloc G=gap S=stack-used", theme.controls);
