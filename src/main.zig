@@ -220,13 +220,20 @@ fn draw_segment_table(
     sim: *sim_mod.Simulation,
     focus_start: ?usize,
     focus_end: ?usize,
+    step_style: ?vaxis.Cell.Style,
 ) !usize {
     const rows = try build_segment_table_rows(allocator, sim);
 
+    const active_fg = if (step_style) |style| style.fg else vaxis.Cell.Color{ .rgb = .{ 8, 10, 12 } };
+    const active_bg = if (step_style) |style| style.bg else vaxis.Cell.Color{ .rgb = .{ 255, 225, 130 } };
+    const selected_fg = if (step_style) |style| style.fg else vaxis.Cell.Color{ .default = {} };
+    const selected_bg = if (step_style) |style| style.bg else vaxis.Cell.Color{ .rgb = .{ 55, 88, 112 } };
+
     var table_ctx: widgets.Table.TableContext = .{
-        .selected_bg = .{ .rgb = .{ 55, 88, 112 } },
-        .active_bg = .{ .rgb = .{ 255, 225, 130 } },
-        .active_fg = .{ .rgb = .{ 8, 10, 12 } },
+        .selected_bg = selected_bg,
+        .selected_fg = selected_fg,
+        .active_bg = active_bg,
+        .active_fg = active_fg,
         .hdr_bg_1 = .{ .rgb = .{ 24, 44, 58 } },
         .hdr_bg_2 = .{ .rgb = .{ 16, 36, 48 } },
         .row_bg_1 = .{ .rgb = .{ 20, 24, 30 } },
@@ -388,6 +395,7 @@ fn memory_layout_ascii(step_idx: usize) []const []const u8 {
             "|   |      BSS       |   |",
             "|   |      DATA      |   |",
             "|   |      TEXT      |   |",
+            "|   +----------------+   |",
             "|       LOW ADDR         |",
             "+------------------------+",
         },
@@ -409,7 +417,7 @@ fn memory_layout_ascii(step_idx: usize) []const []const u8 {
             "| | init   | | zero   |  |",
             "| | values | | values |  |",
             "| +--------+ +--------+  |",
-            "|     fixed regions       |",
+            "|     fixed regions      |",
             "+------------------------+",
         },
         3 => &[_][]const u8{
@@ -440,7 +448,7 @@ fn memory_layout_ascii(step_idx: usize) []const []const u8 {
             "|  +---+      +---+      |",
             "|  |###|  ..  |SSS|      |",
             "|  +---+      +---+      |",
-            "|      gap shrinking      |",
+            "|      gap shrinking     |",
             "+------------------------+",
         },
         else => &[_][]const u8{
@@ -543,7 +551,7 @@ fn render_memory_layout_lesson(win: vaxis.Window, frame_alloc: std.mem.Allocator
         .width = content.width,
         .height = @intCast(content.height -| row),
     });
-    row += try draw_segment_table(table_win, frame_alloc, sim, step.focus_segment_start, step.focus_segment_end + 1);
+    row += try draw_segment_table(table_win, frame_alloc, sim, step.focus_segment_start, step.focus_segment_end + 1, ascii_step_color(clamped_step));
 
     row += 1;
     row += try render_ascii_panel(content, frame_alloc, clamped_step, row, 2);
@@ -614,7 +622,7 @@ fn render_sandbox(win: vaxis.Window, frame_alloc: std.mem.Allocator, sim: *sim_m
         .width = content.width,
         .height = @intCast(content.height -| row),
     });
-    row += try draw_segment_table(table_win, frame_alloc, sim, null, null);
+    row += try draw_segment_table(table_win, frame_alloc, sim, null, null, null);
 
     row += 1;
     print_line_styled(content, row, "Map legend: T=text D=data B=bss .=heap-free 0-F=heap-alloc G=gap S=stack-used", theme.controls);
