@@ -7,6 +7,7 @@ const app = @import("app.zig");
 const menu_ui = @import("ui/menu.zig");
 const sandbox_ui = @import("ui/sandbox.zig");
 const lesson_layout_101 = @import("ui/lesson_layout_101.zig");
+const lesson_text_segment = @import("ui/lesson_text_segment.zig");
 const lesson_placeholder = @import("ui/lesson_placeholder.zig");
 
 const AppEvent = union(enum) {
@@ -16,6 +17,29 @@ const AppEvent = union(enum) {
 
 fn is_enter_pressed(key: vaxis.Key) bool {
     return key.matches(vaxis.Key.enter, .{}) or key.matches('\r', .{});
+}
+
+fn lesson_step_count(topic: app.LessonTopic) usize {
+    return switch (topic) {
+        .memory_layout => lesson_layout_101.step_count(),
+        .text_segment => lesson_text_segment.step_count(),
+        else => 1,
+    };
+}
+
+fn rebuild_lesson_state(topic: app.LessonTopic, sim: *sim_mod.Simulation, step: usize) void {
+    switch (topic) {
+        .memory_layout => lesson_layout_101.rebuild_state(sim, step),
+        .text_segment => lesson_text_segment.rebuild_state(sim, step),
+        else => sim.reset(),
+    }
+}
+
+fn is_guided_lesson(topic: app.LessonTopic) bool {
+    return switch (topic) {
+        .memory_layout, .text_segment => true,
+        else => false,
+    };
 }
 
 pub fn main() !void {
@@ -104,31 +128,28 @@ pub fn main() !void {
                             selected_lesson = app.learn_menu_items[learn_menu_selected];
                             screen = .lesson;
                             lesson_step = 0;
-                            if (selected_lesson == .memory_layout)
-                                lesson_layout_101.rebuild_state(&sim, lesson_step)
-                            else
-                                sim.reset();
+                            rebuild_lesson_state(selected_lesson, &sim, lesson_step);
                         }
                     },
                     .lesson => {
                         if (key.matches('m', .{})) {
                             screen = .learn_menu;
                         }
-                        if (selected_lesson == .memory_layout) {
+                        if (is_guided_lesson(selected_lesson)) {
                             if (key.matches('r', .{})) {
                                 lesson_step = 0;
-                                lesson_layout_101.rebuild_state(&sim, lesson_step);
+                                rebuild_lesson_state(selected_lesson, &sim, lesson_step);
                             }
                             if (key.matches('n', .{}) or key.matches(' ', .{}) or key.matches(vaxis.Key.right, .{})) {
-                                if (lesson_step + 1 < lesson_layout_101.step_count()) {
+                                if (lesson_step + 1 < lesson_step_count(selected_lesson)) {
                                     lesson_step += 1;
-                                    lesson_layout_101.rebuild_state(&sim, lesson_step);
+                                    rebuild_lesson_state(selected_lesson, &sim, lesson_step);
                                 }
                             }
                             if (key.matches('b', .{}) or key.matches(vaxis.Key.left, .{})) {
                                 if (lesson_step > 0) {
                                     lesson_step -= 1;
-                                    lesson_layout_101.rebuild_state(&sim, lesson_step);
+                                    rebuild_lesson_state(selected_lesson, &sim, lesson_step);
                                 }
                             }
                         }
@@ -158,10 +179,11 @@ pub fn main() !void {
             .main_menu => try menu_ui.render_main_menu(win, frame_alloc, main_menu_selected),
             .learn_menu => try menu_ui.render_learn_menu(win, frame_alloc, learn_menu_selected),
             .lesson => {
-                if (selected_lesson == .memory_layout)
-                    try lesson_layout_101.render(win, frame_alloc, &sim, lesson_step)
-                else
-                    try lesson_placeholder.render(win, frame_alloc, selected_lesson);
+                switch (selected_lesson) {
+                    .memory_layout => try lesson_layout_101.render(win, frame_alloc, &sim, lesson_step),
+                    .text_segment => try lesson_text_segment.render(win, frame_alloc, &sim, lesson_step),
+                    else => try lesson_placeholder.render(win, frame_alloc, selected_lesson),
+                }
             },
             .sandbox => try sandbox_ui.render(win, frame_alloc, &sim, view_base),
         }
